@@ -33,6 +33,8 @@
 
 #import "MXError.h"
 
+#import <MatrixSDK/MatrixSDK-Swift.h>
+
 NSString *const kMXRoomDidFlushDataNotification = @"kMXRoomDidFlushDataNotification";
 NSString *const kMXRoomInitialSyncNotification = @"kMXRoomInitialSyncNotification";
 
@@ -730,13 +732,174 @@ NSString *const kMXRoomInitialSyncNotification = @"kMXRoomInitialSyncNotificatio
     return [mxSession.matrixRestClient sendEventToRoom:self.roomId eventType:eventTypeString content:content txnId:txnId success:success failure:failure];
 }
 
+- (MXHTTPOperation*)_sendStateEventOfType:(MXEventTypeString)eventTypeString
+                                  content:(NSDictionary*)content
+                                 stateKey:(NSString *)stateKey
+                                  success:(void (^)(NSString *eventId))success
+                                  failure:(void (^)(NSError *error))failure
+{
+    return [mxSession.matrixRestClient sendStateEventToRoom:self.roomId eventType:eventTypeString content:content stateKey:stateKey success:success failure:failure];
+}
+
 - (MXHTTPOperation*)sendStateEventOfType:(MXEventTypeString)eventTypeString
                                  content:(NSDictionary*)content
                                 stateKey:(NSString *)stateKey
                                  success:(void (^)(NSString *eventId))success
                                  failure:(void (^)(NSError *error))failure
 {
-    return [mxSession.matrixRestClient sendStateEventToRoom:self.roomId eventType:eventTypeString content:content stateKey:stateKey success:success failure:failure];
+    __block MXRoomOperation *roomOperation;
+    
+    __block MXEvent *event;
+    
+    // Protect the SDK against changes in `content`
+    // It is useful in case of:
+    //    - e2e encryption where several asynchronous requests may be required before actually sending the event
+    //    - message order mechanism where events may be queued
+    NSDictionary *contentCopy = [[NSDictionary alloc] initWithDictionary:content copyItems:YES];
+    
+    void(^onSuccess)(NSString *) = ^(NSString *eventId) {
+        
+        if (event)
+        {
+            event.eventId = eventId;
+            
+            event.sentState = MXEventSentStateSent;
+        }
+        
+        if (success)
+        {
+            success(eventId);
+        }
+        
+        [self handleNextOperationAfter:roomOperation];
+    };
+    
+    void(^onFailure)(NSError *) = ^(NSError *error) {
+        
+        if (event)
+        {
+            // Update the local echo with the error state (This will trigger kMXEventDidChangeSentStateNotification notification).
+            event.sentError = error;
+            event.sentState = MXEventSentStateFailed;
+        }
+        
+        if (failure)
+        {
+            failure(error);
+        }
+        
+        [self handleNextOperationAfter:roomOperation];
+    };
+    
+    bool isMatrixEvent = [[eventTypeString substringToIndex:2] isEqualToString:@"m."];
+    
+    // Check whether the content must be encrypted before sending
+    if (mxSession.crypto && self.summary.isEncrypted && !isMatrixEvent)
+    {
+        // Check whether the provided content is already encrypted
+        if ([eventTypeString isEqualToString:kMXEventTypeStringRoomEncrypted])
+        {
+            // We handle here the case where we have to resent an encrypted message event.
+            if (event)
+            {
+                // Update the local echo sent state.
+                event.sentState = MXEventSentStateSending;
+            }
+            
+            roomOperation = [self preserveOperationOrder:event block:^{
+                MXHTTPOperation *operation = [self _sendStateEventOfType:eventTypeString content:contentCopy stateKey:stateKey success:onSuccess failure:onFailure];
+                [roomOperation.operation mutateTo:operation];
+            }];
+        }
+        else
+        {
+            NSDictionary *relatesToJSON = nil;
+            
+            NSDictionary *contentCopyToEncrypt = nil;
+            
+            // Store the "m.relates_to" data and remove them from event clear content before encrypting the event content
+            if (contentCopy[@"m.relates_to"])
+            {
+                relatesToJSON = contentCopy[@"m.relates_to"];
+                NSMutableDictionary *updatedContent = [contentCopy mutableCopy];
+                updatedContent[@"m.relates_to"] = nil;
+                contentCopyToEncrypt = [updatedContent copy];
+            }
+            else
+            {
+                contentCopyToEncrypt = contentCopy;
+            }
+            
+            MXWeakify(self);
+            roomOperation = [self preserveOperationOrder:event block:^{
+                MXStrongifyAndReturnIfNil(self);
+                
+                MXWeakify(self);
+                MXHTTPOperation *operation = [self->mxSession.crypto encryptEventContent:contentCopyToEncrypt withType:eventTypeString inRoom:self success:^(NSDictionary *encryptedContent, NSString *encryptedEventType) {
+                    MXStrongifyAndReturnIfNil(self);
+                    
+                    NSDictionary *finalEncryptedContent;
+                    
+                    // Add "m.relates_to" to encrypted event content if any
+                    if (relatesToJSON)
+                    {
+                        NSMutableDictionary *updatedEncryptedContent = [encryptedContent mutableCopy];
+                        updatedEncryptedContent[@"m.relates_to"] = relatesToJSON;
+                        finalEncryptedContent = [updatedEncryptedContent copy];
+                    }
+                    else
+                    {
+                        finalEncryptedContent = encryptedContent;
+                    }
+                    
+                    if (event)
+                    {
+                        // Encapsulate the resulting event in a fake encrypted event
+                        MXEvent *clearEvent = [self fakeEventWithEventId:event.eventId eventType:eventTypeString andContent:event.content];
+                        
+                        event.wireType = encryptedEventType;
+                        event.wireContent = finalEncryptedContent;
+                        
+                        MXEventDecryptionResult *decryptionResult = [[MXEventDecryptionResult alloc] init];
+                        decryptionResult.clearEvent = clearEvent.JSONDictionary;
+                        decryptionResult.senderCurve25519Key = self.mxSession.crypto.deviceCurve25519Key;
+                        decryptionResult.claimedEd25519Key = self.mxSession.crypto.deviceEd25519Key;
+                        
+                        [event setClearData:decryptionResult];
+                        
+                        // Update the local echo state (This will trigger kMXEventDidChangeSentStateNotification notification).
+                        event.sentState = MXEventSentStateSending;
+                    }
+                    
+                    // Send the encrypted content
+                    MXHTTPOperation *operation2 = [self _sendStateEventOfType:encryptedEventType content:encryptedContent stateKey:eventTypeString success:onSuccess failure:onFailure];
+                    if (operation2)
+                    {
+                        // Mutate MXHTTPOperation so that the user can cancel this new operation
+                        [roomOperation.operation mutateTo:operation2];
+                    }
+                    
+                } failure:^(NSError *error) {
+                    
+                    NSLog(@"[MXRoom] sendStateEventOfType: Cannot encrypt event. Error: %@", error);
+                    
+                    onFailure(error);
+                }];
+                
+                [roomOperation.operation mutateTo:operation];
+            }];
+        }
+    }
+    else
+    {
+        
+        roomOperation = [self preserveOperationOrder:event block:^{
+            MXHTTPOperation *operation = [self _sendStateEventOfType:eventTypeString content:contentCopy stateKey:stateKey success:onSuccess failure:onFailure];
+            [roomOperation.operation mutateTo:operation];
+        }];
+    }
+    
+    return roomOperation.operation;
 }
 
 - (MXHTTPOperation*)sendMessageWithContent:(NSDictionary*)content

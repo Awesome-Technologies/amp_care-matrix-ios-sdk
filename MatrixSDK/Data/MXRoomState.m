@@ -478,6 +478,9 @@
                 }
                 default:
                     // Store other states into the stateEvents dictionary.
+                    if (event.isEncrypted) {
+                        [mxSession decryptEvent:event inTimeline:nil];
+                    }
                     if (!stateEvents[event.type])
                     {
                         stateEvents[event.type] = [NSMutableArray array];
