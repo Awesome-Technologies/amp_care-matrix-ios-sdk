@@ -2,6 +2,7 @@
  Copyright 2016 OpenMarket Ltd
  Copyright 2017 Vector Creations Ltd
  Copyright 2018 New Vector Ltd
+ Copyright 2019 The Matrix.org Foundation C.I.C
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -68,34 +69,34 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 @implementation MXEventTimeline
 
 #pragma mark - Initialisation
-- (id)initWithRoom:(MXRoom*)room2 andInitialEventId:(NSString*)initialEventId
+- (id)initWithRoom:(MXRoom*)theRoom andInitialEventId:(NSString*)initialEventId
 {
     // Is it a past or live timeline?
     if (initialEventId)
     {
         // Events for a past timeline are stored in memory
         MXMemoryStore *memoryStore = [[MXMemoryStore alloc] init];
-        [memoryStore openWithCredentials:room2.mxSession.matrixRestClient.credentials onComplete:nil failure:nil];
+        [memoryStore openWithCredentials:theRoom.mxSession.matrixRestClient.credentials onComplete:nil failure:nil];
 
-        self = [self initWithRoom:room2 initialEventId:initialEventId andStore:memoryStore];
+        self = [self initWithRoom:theRoom initialEventId:initialEventId andStore:memoryStore];
     }
     else
     {
         // Live: store events in the session store
-        self = [self initWithRoom:room2 initialEventId:initialEventId andStore:room2.mxSession.store];
+        self = [self initWithRoom:theRoom initialEventId:initialEventId andStore:theRoom.mxSession.store];
     }
     return self;
 }
 
-- (id)initWithRoom:(MXRoom*)room2 initialEventId:(NSString*)initialEventId andStore:(id<MXStore>)store2
+- (id)initWithRoom:(MXRoom*)theRoom initialEventId:(NSString*)initialEventId andStore:(id<MXStore>)theStore
 {
     self = [super init];
     if (self)
     {
         _timelineId = [[NSUUID UUID] UUIDString];
         _initialEventId = initialEventId;
-        room = room2;
-        store = store2;
+        room = theRoom;
+        store = theStore;
         eventListeners = [NSMutableArray array];
 
         if (!initialEventId)
@@ -104,8 +105,13 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         }
 
         _state = [[MXRoomState alloc] initWithRoomId:room.roomId andMatrixSession:room.mxSession andDirection:YES];
-        
-        _roomEventFilter = [[MXRoomEventFilter alloc] init];
+
+        // If the event stream runs with lazy loading, the timeline must do the same
+        if (room.mxSession.syncWithLazyLoadOfRoomMembers)
+        {
+            _roomEventFilter = [MXRoomEventFilter new];
+            _roomEventFilter.lazyLoadMembers = YES;
+        }
     }
     return self;
 }
@@ -192,16 +198,9 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     forwardsPaginationToken = nil;
     hasReachedHomeServerForwardsPaginationEnd = NO;
 
-    MXRoomEventFilter *filter;
-    if (room.mxSession.syncWithLazyLoadOfRoomMembers)
-    {
-        filter = [MXRoomEventFilter new];
-        filter.lazyLoadMembers = YES;
-    }
-
     // Get the context around the initial event
     MXWeakify(self);
-    return [room.mxSession.matrixRestClient contextOfEvent:_initialEventId inRoom:room.roomId limit:limit filter:filter success:^(MXEventContext *eventContext) {
+    return [room.mxSession.matrixRestClient contextOfEvent:_initialEventId inRoom:room.roomId limit:limit filter:_roomEventFilter success:^(MXEventContext *eventContext) {
         MXStrongifyAndReturnIfNil(self);
 
         // And fill the timelime with received data
@@ -311,18 +310,6 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     else
     {
         paginationToken = forwardsPaginationToken;
-    }
-
-
-    // If the event stream runs with lazy loading, the timeline must do the same
-    if (room.mxSession.syncWithLazyLoadOfRoomMembers)
-    {
-        if (!_roomEventFilter)
-        {
-            _roomEventFilter = [MXRoomEventFilter new];
-        }
-
-        _roomEventFilter.lazyLoadMembers = YES;
     }
 
     NSLog(@"[MXEventTimeline] paginate : request %tu messages from the server", numItems);
@@ -535,8 +522,22 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     {
         if (direction == MXTimelineDirectionBackwards)
         {
-            // Enrich the timeline root state with the additional state events observed during back pagination
-            [self handleStateEvents:paginatedResponse.state direction:MXTimelineDirectionForwards];
+            // Enrich the timeline root state with the additional state events observed during back pagination.
+            // Check that it is a member state event (it should always be the case) and
+            // that this memeber is not already known in our live room state
+            NSMutableArray<MXEvent *> *selectedStateEvents = [NSMutableArray array];
+            for (MXEvent *stateEvent in paginatedResponse.state)
+            {
+                if ((stateEvent.eventType == MXEventTypeRoomMember)
+                    && ![_state.members memberWithUserId: stateEvent.stateKey]) {
+                    [selectedStateEvents addObject:stateEvent];
+                }
+            }
+            
+            if (selectedStateEvents.count)
+            {
+                [self handleStateEvents:selectedStateEvents direction:MXTimelineDirectionForwards];
+            }
         }
 
         // Enrich intermediate room state while paginating
@@ -610,7 +611,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
         if (![room.mxSession decryptEvent:event inTimeline:timelineId])
         {
-            NSLog(@"[MXTimeline] addEvent: Warning: Unable to decrypt event: %@\nError: %@", event.content[@"body"], event.decryptionError);
+            NSLog(@"[MXTimeline] addEvent: Warning: Unable to decrypt event %@\nError: %@", event.eventId, event.decryptionError);
         }
     }
 

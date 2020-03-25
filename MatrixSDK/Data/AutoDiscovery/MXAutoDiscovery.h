@@ -26,6 +26,14 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  Create a `MXAutoDiscovery` instance.
 
+ @param url the homeserver url (ex: "https://matrix.org").
+ @return a `MXAutoDiscovery` instance.
+ */
+- (nullable instancetype)initWithUrl:(NSString *)url;
+
+/**
+ Create a `MXAutoDiscovery` instance.
+
  @param domain  homeserver domain (ex: "matrix.org" from userId "@user:matrix.org").
  @return a `MXAutoDiscovery` instance.
  */
@@ -45,6 +53,18 @@ NS_ASSUME_NONNULL_BEGIN
  */
 - (MXHTTPOperation*)findClientConfig:(void (^)(MXDiscoveredClientConfig *discoveredClientConfig))complete
                              failure:(void (^)(NSError *error))failure;;
+
+/**
+ Get the wellknwon data of the homeserver.
+
+ @param success A block object called when the operation succeeds. It provides
+                the wellknown data.
+ @param failure A block object called when the operation fails.
+
+ @return a MXHTTPOperation instance.
+ */
+- (MXHTTPOperation*)wellKnow:(void (^)(MXWellKnown *wellKnown))success
+                     failure:(void (^)(NSError *error))failure;
 
 @end
 

@@ -325,7 +325,7 @@ RLM_ARRAY_TYPE(MXRealmOlmInboundGroupSession)
             }
         }
 
-        NSLog(@"[MXRealmCryptoStore] Schema version: %tu", account.realm.configuration.schemaVersion);
+        NSLog(@"[MXRealmCryptoStore] Schema version: %llu", account.realm.configuration.schemaVersion);
     }
     return self;
 }
@@ -809,7 +809,7 @@ RLM_ARRAY_TYPE(MXRealmOlmInboundGroupSession)
 
             if (realmSession)
             {
-                realmSession.backedUp = @(YES);
+                realmSession.backedUp = YES;
 
                 [realm addOrUpdateObject:realmSession];
             }
@@ -1129,7 +1129,7 @@ RLM_ARRAY_TYPE(MXRealmOlmInboundGroupSession)
 
         if (oldSchemaVersion < kMXRealmCryptoStoreVersion)
         {
-            NSLog(@"[MXRealmCryptoStore] Required migration detected. oldSchemaVersion: %tu - current: %tu", oldSchemaVersion, kMXRealmCryptoStoreVersion);
+            NSLog(@"[MXRealmCryptoStore] Required migration detected. oldSchemaVersion: %llu - current: %tu", oldSchemaVersion, kMXRealmCryptoStoreVersion);
 
             switch (oldSchemaVersion)
             {
@@ -1306,9 +1306,11 @@ RLM_ARRAY_TYPE(MXRealmOlmInboundGroupSession)
 
         // Report this db reset to higher modules
         // A user logout and in is anyway required to make crypto work reliably again
-        [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionCryptoDidCorruptDataNotification
-                                                            object:userId
-                                                          userInfo:nil];
+        dispatch_async(dispatch_get_main_queue(),^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionCryptoDidCorruptDataNotification
+                                                                object:userId
+                                                              userInfo:nil];
+        });
     }
 
     if (cleanDuplicatedDevices)

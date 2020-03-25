@@ -1,3 +1,79 @@
+Changes in Matrix iOS SDK in 0.15.3 (2019-xx-xx)
+===============================================
+
+
+Changes in Matrix iOS SDK in 0.15.2 (2019-12-05)
+===============================================
+
+Improvements:
+ * Add macOS target with unit tests.
+
+Bug fix:
+ * MXCallAudioSessionConfigurator: Fix compilation issue with macOS.
+ * MXRoomSummary: Fix potential crash when `_lastMessageOthers` is null.
+ 
+API break:
+ * MXCallAudioSessionConfigurator: Now unavailable for macOS.
+
+Changes in Matrix iOS SDK in 0.15.1 (2019-12-04)
+===============================================
+
+Improvements:
+ * Well-known: Expose "m.integrations" according to [MSC1957](https://github.com/matrix-org/matrix-doc/pull/1957) (vector-im/riot-ios#2815).
+ * MXSession: Expose and store homeserverWellknown.
+ * SwiftMatrixSDK: Add missing start(withSyncFilter:) refinement to MXSession.swift.
+ 
+Bug fix:
+ * MXIdentityServerRestClient: Match registration endpoint to the IS r0.3.0 spec (vector-im/riot-ios#2824).
+
+Changes in Matrix iOS SDK in 0.15.0 (2019-11-06)
+===============================================
+
+Improvements:
+ * MX3PidAddManager: Add User-Interactive Auth to /account/3pid/add (vector-im/riot-ios#2744).
+ * MXSession: On resume, make the first /sync request trigger earlier (vector-im/riot-ios#2793).
+ * MXCrypto: Do not fail to decrypt when there is nothing to decrypt (redacted events).
+
+Bug fix:
+ * Room members who left are listed with the actual members (vector-im/riot-ios#2737).
+ * MX3PidAddManager: Add User-Interactive Auth to /account/3pid/add (vector-im/riot-ios#2744).
+ * MXHTTPOperation: Make urlResponseFromError return the url response in case of MXError.
+ * MXHTTPOperation: Fix a crash in `-mutateTo:` method when operation parameter is nil.
+ * VoIP: Fix regression when using a TURN server (vector-im/riot-ios#2796).
+
+API break:
+ * MXBackgroundModeHandler: Update interface and now use a single method that return a MXBackgroundTask.
+
+Changes in Matrix iOS SDK in 0.14.0 (2019-10-11)
+===============================================
+
+Improvements:
+ * MXServiceTerms: A class to support MSC2140 (Terms of Service API) (vector-im/riot-ios#2600).
+ * MXRestClient: Remove identity server URL fallback to homeserver one's when there is no identity server configured.
+ * MXRestClient: Add new APIs from MSC2290 (matrix-org/matrix-doc/pull/2290).
+ * MXHTTPClient: Improve M_LIMIT_EXCEEDED error handling: Do not wait to try again if the mentioned delay is too long.
+ * MXEventTimeline: The roomEventFilter property is now writable (vector-im/riot-ios#2615).
+ * VoIP: Make call start if there is no STUN server.
+ * MXMatrixVersions: Add doesServerRequireIdentityServerParam and doesServerAcceptIdentityAccessToken properties.
+ * MXMatrixVersions: Support r0.6.0. Add doesServerSupportSeparateAddAndBind (vector-im/riot-ios#2718).
+ * Create MXIdentityServerRestClient and MXIdentityService to manage identity server requests (vector-im/riot-ios#2647).
+ * MXIdentityService: Support identity server v2 API. Handle identity server v2 API authentification and use the hashed v2 lookup API for 3PIDs (vector-im/riot-ios#2603 and /vector-im/riot-ios#2652).
+ * MXHTTPClient: Add access token renewal plus request retry mechanism.
+ * MXHTTPClient: Do not retry requests if the host is not valid.
+ * MXAutoDiscovery: Add initWithUrl contructor.
+ * MX3PidAddManager: New class to handle add 3pids to HS and to bind to IS.
+ * Privacy: Store Identity Server in Account Data ([MSC2230](https://github.com/matrix-org/matrix-doc/pull/2230))(vector-im/riot-ios#2665).
+ * Privacy: Lowercase emails during IS lookup calls (vector-im/riot-ios#2696).
+ * Privacy: MXRestClient: Use `id_access_token` in CS API when required (vector-im/riot-ios#2704).
+ * Privacy: Sending Third-Party Request Tokens via the Homeserver ([MSC2078](https://github.com/matrix-org/matrix-doc/pull/2078)).
+
+API break:
+ * MXRestClient: Remove identity server requests. Now MXIdentityService is used to perform identity server requests.
+ * MXRestClient: requestTokenForPhoneNumber returns an additional optional parameter (`submitUrl`).
+ 
+Bug Fix:
+ * Send kMXSessionCryptoDidCorruptDataNotification from the main thread.
+
 Changes in Matrix iOS SDK in 0.13.1 (2019-08-08)
 ===============================================
 

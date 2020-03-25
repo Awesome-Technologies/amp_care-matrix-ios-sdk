@@ -17,26 +17,25 @@
 #import "MXAutoDiscovery.h"
 
 #import "MXRestClient.h"
+#import "MXIdentityService.h"
 
 @interface MXAutoDiscovery ()
 {
     MXRestClient *restClient;
 }
 
+@property (nonatomic, strong) MXIdentityService *identityService;
+
 @end
 
 @implementation MXAutoDiscovery
 
-- (nullable instancetype)initWithDomain:(NSString *)domain
+- (nullable instancetype)initWithUrl:(NSString *)url
 {
     self = [super init];
     if (self)
     {
-        NSURLComponents *components = [NSURLComponents new];
-        components.scheme = @"https";
-        components.host = domain;
-
-        restClient = [[MXRestClient alloc] initWithHomeServer:components.URL.absoluteString
+        restClient = [[MXRestClient alloc] initWithHomeServer:url
                             andOnUnrecognizedCertificateBlock:nil];
 
         // The .well-known/matrix/client API is often just a static file returned with no content type.
@@ -46,13 +45,22 @@
     return self;
 }
 
+- (nullable instancetype)initWithDomain:(NSString *)domain
+{
+    NSURLComponents *components = [NSURLComponents new];
+    components.scheme = @"https";
+    components.host = domain;
+
+    return [self initWithUrl:components.URL.absoluteString];
+}
+
 - (MXHTTPOperation *)findClientConfig:(void (^)(MXDiscoveredClientConfig * _Nonnull))complete
                               failure:(void (^)(NSError * _Nonnull))failure
 {
     NSLog(@"[MXAutoDiscovery] findClientConfig: %@", restClient.homeserver);
 
     MXHTTPOperation *operation;
-    operation = [restClient wellKnow:^(MXWellKnown *wellKnown) {
+    operation = [self wellKnow:^(MXWellKnown *wellKnown) {
 
         if (!wellKnown.homeServer.baseUrl)
         {
@@ -100,6 +108,13 @@
     return operation;
 }
 
+- (MXHTTPOperation*)wellKnow:(void (^)(MXWellKnown *wellKnown))success
+                     failure:(void (^)(NSError *error))failure
+{
+    NSLog(@"[MXAutoDiscovery] wellKnow: %@", restClient.homeserver);
+    return [restClient wellKnow:success failure:failure];
+}
+
 
 #pragma mark - Private methods
 
@@ -112,8 +127,12 @@
 - (MXHTTPOperation *)validateHomeserverAndProceed:(MXWellKnown*)wellKnown
                                          complete:(void (^)(MXDiscoveredClientConfig * _Nonnull))complete
 {
+    NSString *identityServer = wellKnown.identityServer.baseUrl;
+    
     restClient = [[MXRestClient alloc] initWithHomeServer:wellKnown.homeServer.baseUrl andOnUnrecognizedCertificateBlock:nil];
-    restClient.identityServer = wellKnown.identityServer.baseUrl;
+    restClient.identityServer = identityServer;
+    
+    self.identityService = [[MXIdentityService alloc] initWithIdentityServer:identityServer accessToken:nil andHomeserverRestClient:restClient];
 
     // Ping one CS API to check the HS
     MXHTTPOperation *operation;
@@ -152,20 +171,20 @@
 }
 
 - (MXHTTPOperation *)validateIdentityServerAndFinish:(MXWellKnown*)wellKnown
-                                         complete:(void (^)(MXDiscoveredClientConfig * _Nonnull))complete
+                                            complete:(void (^)(MXDiscoveredClientConfig * _Nonnull))complete
 {
     MXHTTPOperation *operation;
-    operation = [restClient pingIdentityServer:^{
-
+    operation = [self.identityService pingIdentityServer:^{
+        
         NSLog(@"[MXAutoDiscovery] validateIdentityServerAndFinish: PROMPT. wellKnown: %@", wellKnown);
         complete([[MXDiscoveredClientConfig alloc] initWithAction:MXDiscoveredClientConfigActionPrompt andWellKnown:wellKnown]);
-
+        
     } failure:^(NSError *error) {
-
+        
         NSLog(@"[MXAutoDiscovery] validateIdentityServerAndFinish: FAIL_ERROR (invalid identity server not responding)");
         complete([[MXDiscoveredClientConfig alloc] initWithAction:MXDiscoveredClientConfigActionFailError]);
     }];
-
+    
     return operation;
 }
 

@@ -47,7 +47,7 @@
 
 #pragma mark - Constants definitions
 
-const NSString *MatrixSDKVersion = @"0.13.1";
+const NSString *MatrixSDKVersion = @"0.15.2";
 NSString *const kMXSessionStateDidChangeNotification = @"kMXSessionStateDidChangeNotification";
 NSString *const kMXSessionNewRoomNotification = @"kMXSessionNewRoomNotification";
 NSString *const kMXSessionWillLeaveRoomNotification = @"kMXSessionWillLeaveRoomNotification";
@@ -58,6 +58,7 @@ NSString *const kMXSessionOnToDeviceEventNotification = @"kMXSessionOnToDeviceEv
 NSString *const kMXSessionIgnoredUsersDidChangeNotification = @"kMXSessionIgnoredUsersDidChangeNotification";
 NSString *const kMXSessionDirectRoomsDidChangeNotification = @"kMXSessionDirectRoomsDidChangeNotification";
 NSString *const kMXSessionAccountDataDidChangeNotification = @"kMXSessionAccountDataDidChangeNotification";
+NSString *const kMXSessionAccountDataDidChangeIdentityServerNotification = @"kMXSessionAccountDataDidChangeIdentityServerNotification";
 NSString *const kMXSessionDidCorruptDataNotification = @"kMXSessionDidCorruptDataNotification";
 NSString *const kMXSessionCryptoDidCorruptDataNotification = @"kMXSessionCryptoDidCorruptDataNotification";
 NSString *const kMXSessionNewGroupInviteNotification = @"kMXSessionNewGroupInviteNotification";
@@ -143,15 +144,14 @@ typedef void (^MXOnResumeDone)(void);
     NSMutableArray<MXPeekingRoom *> *peekingRooms;
 
     /**
-     The background task used when the session continue to run the events stream when
-     the app goes in background.
-     */
-    NSUInteger backgroundTaskIdentifier;
-
-    /**
      For debug, indicate if the first sync after the MXSession startup is done.
      */
     BOOL firstSyncDone;
+
+    /**
+     The tool to refresh the homeserver wellknown data.
+     */
+    MXAutoDiscovery *autoDiscovery;
     
     /**
      Queue of requested direct room change operations ([MXSession setRoom:directWithUserId:]
@@ -178,6 +178,12 @@ typedef void (^MXOnResumeDone)(void);
 
 @property (nonatomic, readwrite) MXScanManager *scanManager;
 
+/**
+ The background task used when the session continue to run the events stream when
+ the app goes in background.
+ */
+@property (nonatomic, strong) id<MXBackgroundTask> backgroundTask;
+
 @end
 
 @implementation MXSession
@@ -189,6 +195,7 @@ typedef void (^MXOnResumeDone)(void);
     if (self)
     {
         matrixRestClient = mxRestClient;
+        _threePidAddManager = [[MX3PidAddManager alloc] initWithMatrixSession:self];
         mediaManager = [[MXMediaManager alloc] initWithHomeServer:matrixRestClient.homeserver];
         rooms = [NSMutableDictionary dictionary];
         roomsSummaries = [NSMutableDictionary dictionary];
@@ -200,14 +207,10 @@ typedef void (^MXOnResumeDone)(void);
         _preventPauseCount = 0;
         directRoomsOperationsQueue = [NSMutableArray array];
         publicisedGroupsByUserId = [[NSMutableDictionary alloc] init];
+
+        [self setIdentityServer:mxRestClient.identityServer andAccessToken:mxRestClient.credentials.identityServerAccessToken];
         
         firstSyncDone = NO;
-
-        id<MXBackgroundModeHandler> handler = [MXSDKOptions sharedInstance].backgroundModeHandler;
-        if (handler)
-        {
-            backgroundTaskIdentifier = [handler invalidIdentifier];
-        }
 
         _acknowledgableEventTypes = @[kMXEventTypeStringRoomName,
                                       kMXEventTypeStringRoomTopic,
@@ -386,6 +389,28 @@ typedef void (^MXOnResumeDone)(void);
     }];
 }
 
+- (void)setIdentityServer:(NSString *)identityServer andAccessToken:(NSString *)accessToken
+{
+    NSLog(@"[MXSession] setIdentityServer: %@", identityServer);
+    
+    matrixRestClient.identityServer = identityServer;
+
+    if (identityServer)
+    {
+        _identityService = [[MXIdentityService alloc] initWithIdentityServer:identityServer accessToken:accessToken andHomeserverRestClient:matrixRestClient];
+    }
+    else
+    {
+        _identityService = nil;
+    }
+
+    MXWeakify(self);
+    matrixRestClient.identityServerAccessTokenHandler = ^MXHTTPOperation *(void (^success)(NSString *accessToken), void (^failure)(NSError *error)) {
+        MXStrongifyAndReturnValueIfNil(self, nil);
+        return [self.identityService accessTokenWithSuccess:success failure:failure];
+    };
+}
+
 - (void)start:(void (^)(void))onServerSyncDone
       failure:(void (^)(NSError *error))failure
 {
@@ -477,36 +502,20 @@ typedef void (^MXOnResumeDone)(void);
     // Can we resume from data available in the cache
     if (_store.isPermanent && self.isEventStreamInitialised && 0 < _store.rooms.count)
     {
+        // Resume the stream (presence will be retrieved during server sync)
+        NSLog(@"[MXSession] Resuming the events stream from %@...", self.store.eventStreamToken);
+        NSDate *startDate2 = [NSDate date];
+        [self resume:^{
+            NSLog(@"[MXSession] Events stream resumed in %.0fms", [[NSDate date] timeIntervalSinceDate:startDate2] * 1000);
+
+            onServerSyncDone();
+        }];
+
         // Start crypto if enabled
-        MXWeakify(self);
         [self startCrypto:^{
-            MXStrongifyAndReturnIfNil(self);
-
-            // Resume the stream (presence will be retrieved during server sync)
-            NSLog(@"[MXSession] Resuming the events stream from %@...", self.store.eventStreamToken);
-            NSDate *startDate2 = [NSDate date];
-            [self resume:^{
-                NSLog(@"[MXSession] Events stream resumed in %.0fms", [[NSDate date] timeIntervalSinceDate:startDate2] * 1000);
-
-                onServerSyncDone();
-            }];
-
+            NSLog(@"[MXSession] Crypto has been started");
         }  failure:^(NSError *error) {
-
             NSLog(@"[MXSession] Crypto failed to start. Error: %@", error);
-            
-            // Check whether the token is valid
-            if ([self isUnknownTokenError:error])
-            {
-                // Do nothing more because without a valid access_token, the session is useless
-                return;
-            }
-            
-            // Else consider the sync has failed
-            [self setState:MXSessionStateInitialSyncFailed];
-            // Inform the caller that an error has occurred
-            failure(error);
-
         }];
     }
     else
@@ -570,6 +579,12 @@ typedef void (^MXOnResumeDone)(void);
             
         }];
     }
+
+    // Get wellknown data only at the login time
+    if (!self.homeserverWellknown)
+    {
+        [self refreshHomeserverWellknown:nil failure:nil];
+    }
 }
 
 - (NSString *)syncFilterId
@@ -590,18 +605,17 @@ typedef void (^MXOnResumeDone)(void);
             NSLog(@"[MXSession pause] Prevent the session from being paused. preventPauseCount: %tu", _preventPauseCount);
             
             id<MXBackgroundModeHandler> handler = [MXSDKOptions sharedInstance].backgroundModeHandler;
-            if (handler && backgroundTaskIdentifier == [handler invalidIdentifier])
+            
+            if (handler && !self.backgroundTask.isRunning)
             {
                 MXWeakify(self);
-                backgroundTaskIdentifier = [handler startBackgroundTaskWithName:@"MXSessionBackgroundTask" completion:^{
+                
+                self.backgroundTask = [handler startBackgroundTaskWithName:@"[MXSession] pause" expirationHandler:^{
                     MXStrongifyAndReturnIfNil(self);
-
-                    NSLog(@"[MXSession pause] Background task #%tu is going to expire - ending it", self->backgroundTaskIdentifier);
                     
                     // We cannot continue to run in background. Pause the session for real
                     self.preventPauseCount = 0;
                 }];
-                NSLog(@"[MXSession pause] Created background task #%tu", backgroundTaskIdentifier);
             }
             
             [self setState:MXSessionStatePauseRequested];
@@ -634,13 +648,11 @@ typedef void (^MXOnResumeDone)(void);
 - (void)resume:(void (^)(void))resumeDone
 {
     NSLog(@"[MXSession] resume the event stream from state %tu", _state);
-
-    id<MXBackgroundModeHandler> handler = [MXSDKOptions sharedInstance].backgroundModeHandler;
-    if (handler && backgroundTaskIdentifier != [handler invalidIdentifier])
+    
+    if (self.backgroundTask.isRunning)
     {
-        NSLog(@"[MXSession resume] Stop background task #%tu", backgroundTaskIdentifier);
-        [handler endBackgrounTaskWithIdentifier:backgroundTaskIdentifier];
-        backgroundTaskIdentifier = [handler invalidIdentifier];
+        [self.backgroundTask stop];
+        self.backgroundTask = nil;
     }
 
     // Check whether no request is already in progress
@@ -780,11 +792,10 @@ typedef void (^MXOnResumeDone)(void);
     userIdsWithOutdatedPublicisedGroups = nil;
 
     // Stop background task
-    id<MXBackgroundModeHandler> handler = [MXSDKOptions sharedInstance].backgroundModeHandler;
-    if (handler && backgroundTaskIdentifier != [handler invalidIdentifier])
+    if (self.backgroundTask.isRunning)
     {
-        [handler endBackgrounTaskWithIdentifier:backgroundTaskIdentifier];
-        backgroundTaskIdentifier = [handler invalidIdentifier];
+        [self.backgroundTask stop];
+        self.backgroundTask = nil;
     }
 
     _myUser = nil;
@@ -892,12 +903,11 @@ typedef void (^MXOnResumeDone)(void);
     if (_preventPauseCount == 0)
     {
         // The background task can be released
-        id<MXBackgroundModeHandler> handler = [MXSDKOptions sharedInstance].backgroundModeHandler;
-        if (handler && backgroundTaskIdentifier != [handler invalidIdentifier])
+        if (self.backgroundTask.isRunning)
         {
-            NSLog(@"[MXSession pause] Stop background task #%tu", backgroundTaskIdentifier);
-            [handler endBackgrounTaskWithIdentifier:backgroundTaskIdentifier];
-            backgroundTaskIdentifier = [handler invalidIdentifier];
+            NSLog(@"[MXSession pause] Stop background task %@", self.backgroundTask);
+            [self.backgroundTask stop];
+            self.backgroundTask = nil;
         }
 
         // And the session can be paused for real if it was not resumed before
@@ -923,10 +933,11 @@ typedef void (^MXOnResumeDone)(void);
     // Determine if we are catching up
     _catchingUp = (0 == serverTimeout);
 
-    NSLog(@"[MXSession] Do a server sync%@", _catchingUp ? @" (catching up)" : @"");
+    NSString * streamToken = _store.eventStreamToken;
+    NSLog(@"[MXSession] Do a server sync%@: %@", _catchingUp ? @" (catching up)" : @"", streamToken);
 
     MXWeakify(self);
-    eventStreamRequest = [matrixRestClient syncFromToken:_store.eventStreamToken serverTimeout:serverTimeout clientTimeout:clientTimeout setPresence:setPresence filter:self.syncFilterId success:^(MXSyncResponse *syncResponse) {
+    eventStreamRequest = [matrixRestClient syncFromToken:streamToken serverTimeout:serverTimeout clientTimeout:clientTimeout setPresence:setPresence filter:self.syncFilterId success:^(MXSyncResponse *syncResponse) {
         MXStrongifyAndReturnIfNil(self);
 
         // Make sure [MXSession close] or [MXSession pause] has not been called before the server response
@@ -1470,6 +1481,23 @@ typedef void (^MXOnResumeDone)(void);
 
             // Update the corresponding part of account data
             [_accountData updateWithEvent:event];
+
+            if ([event[@"type"] isEqualToString:kMXAccountDataTypeIdentityServer])
+            {
+                NSString *identityServer = self.accountDataIdentityServer;
+                if (identityServer != self.identityService.identityServer
+                    && ![identityServer isEqualToString:self.identityService.identityServer])
+                {
+                    NSLog(@"[MXSession] handleAccountData: Update identity server: %@ -> %@", self.identityService.identityServer, identityServer);
+
+                    // Use the IS from the account data
+                    [self setIdentityServer:identityServer andAccessToken:nil];
+                }
+
+                [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionAccountDataDidChangeIdentityServerNotification
+                                                                    object:self
+                                                                  userInfo:nil];
+            }
         }
 
         _store.userAccountData = _accountData.accountData;
@@ -1864,27 +1892,36 @@ typedef void (^MXOnResumeDone)(void);
                      success:(void (^)(MXRoom *room))success
                      failure:(void (^)(NSError *error))failure
 {
+    if (!self.identityService)
+    {
+        NSLog(@"[MXSession] Missing identity service");
+        failure([NSError errorWithDomain:kMXNSErrorDomain code:0 userInfo:@{
+                                                                            NSLocalizedDescriptionKey: @"Missing identity service"
+                                                                            }]);
+        return nil;
+    }
+    
     MXHTTPOperation *httpOperation;
-
+    
     MXWeakify(self);
-    httpOperation = [matrixRestClient signUrl:signUrl success:^(NSDictionary *thirdPartySigned) {
+    httpOperation = [self.identityService signUrl:signUrl success:^(NSDictionary *thirdPartySigned) {
         MXStrongifyAndReturnIfNil(self);
-
+        
         MXHTTPOperation *httpOperation2 = [self->matrixRestClient joinRoom:roomIdOrAlias viaServers:viaServers withThirdPartySigned:thirdPartySigned success:^(NSString *theRoomId) {
-
+            
             [self onJoinedRoom:theRoomId success:success];
-
+            
         } failure:failure];
-
+        
         // Transfer the new AFHTTPRequestOperation to the returned MXHTTPOperation
         // So that user has hand on it
         if (httpOperation)
         {
             httpOperation.operation = httpOperation2.operation;
         }
-
+        
     } failure:failure];
-
+    
     return httpOperation;
 }
 
@@ -2065,10 +2102,7 @@ typedef void (^MXOnResumeDone)(void);
         }
 
         MXHTTPOperation *operation2 = [self uploadDirectRoomsInOperationsQueue:newDirectRooms success:success failure:failure];
-        if (operation2)
-        {
-            [operation mutateTo:operation2];
-        }
+        [operation mutateTo:operation2];
     }];
 
     return operation;
@@ -2085,10 +2119,7 @@ typedef void (^MXOnResumeDone)(void);
         MXStrongifyAndReturnIfNil(self);
 
         MXHTTPOperation *operation2 = [self uploadDirectRoomsInOperationsQueue:directRooms success:success failure:failure];
-        if (operation2)
-        {
-            [operation mutateTo:operation2];
-        }
+        [operation mutateTo:operation2];
     }];
 
     return operation;
@@ -3382,6 +3413,113 @@ typedef void (^MXOnResumeDone)(void);
     return [matrixRestClient setAccountData:data forType:type success:success failure:failure];
 }
 
+- (MXHTTPOperation *)setAccountDataIdentityServer:(NSString *)identityServer
+                                          success:(void (^)(void))success
+                                          failure:(void (^)(NSError *))failure
+{
+    // Sanitise the passed URL
+    if (!identityServer.length)
+    {
+        identityServer = nil;
+    }
+    if (identityServer)
+    {
+        if (![identityServer hasPrefix:@"http"])
+        {
+            identityServer = [NSString stringWithFormat:@"https://%@", identityServer];
+        }
+        if ([identityServer hasSuffix:@"/"])
+        {
+            identityServer = [identityServer substringToIndex:identityServer.length - 1];
+        }
+    }
+
+    NSLog(@"[MXSession] setAccountDataIdentityServer: %@", identityServer);
+
+    MXHTTPOperation *operation;
+    if (identityServer)
+    {
+        // Does the URL point to a true IS
+        __block MXIdentityService *identityService = [[MXIdentityService alloc] initWithIdentityServer:identityServer accessToken:nil andHomeserverRestClient:matrixRestClient];
+
+        operation = [identityService pingIdentityServer:^{
+            identityService = nil;
+
+            MXHTTPOperation *operation2 = [self setAccountData:@{
+                                                                 kMXAccountDataKeyIdentityServer:identityServer
+                                                                 }
+                                                       forType:kMXAccountDataTypeIdentityServer
+                                                       success:success failure:failure];
+            
+            [operation mutateTo:operation2];
+
+        } failure:^(NSError * _Nonnull error) {
+            identityService = nil;
+
+            NSLog(@"[MXSession] setAccountDataIdentityServer: Invalid identity server. Error: %@", error);
+
+            if (failure)
+            {
+                failure(error);
+            }
+        }];
+    }
+    else
+    {
+        operation = [self setAccountData:@{
+                                            kMXAccountDataKeyIdentityServer:NSNull.null
+                                            }
+                                  forType:kMXAccountDataTypeIdentityServer
+                                  success:success failure:failure];
+    }
+
+    return operation;
+}
+
+- (BOOL)hasAccountDataIdentityServerValue
+{
+    return ([self.accountData accountDataForEventType:kMXAccountDataTypeIdentityServer] != nil);
+}
+
+- (NSString *)accountDataIdentityServer
+{
+    NSString *accountDataIdentityServer;
+
+    NSDictionary *content = [self.accountData accountDataForEventType:kMXAccountDataTypeIdentityServer];
+    MXJSONModelSetString(accountDataIdentityServer, content[kMXAccountDataKeyIdentityServer]);
+
+    return accountDataIdentityServer;
+}
+
+
+#pragma mark - Homeserver information
+- (MXWellKnown *)homeserverWellknown
+{
+    return _store.homeserverWellknown;
+}
+
+- (MXHTTPOperation *)refreshHomeserverWellknown:(void (^)(MXWellKnown *))success
+                                        failure:(void (^)(NSError *))failure
+{
+    NSLog(@"[MXSession] refreshHomeserverWellknown");
+    if (!autoDiscovery)
+    {
+        autoDiscovery = [[MXAutoDiscovery alloc] initWithUrl:matrixRestClient.homeserver];
+    }
+
+    MXWeakify(self);
+    return [autoDiscovery wellKnow:^(MXWellKnown * _Nonnull wellKnown) {
+        MXStrongifyAndReturnIfNil(self);
+
+        [self.store storeHomeserverWellknown:wellKnown];
+
+        if (success)
+        {
+            success(wellKnown);
+        }
+    } failure:failure];
+}
+
 
 #pragma mark - Matrix filters
 - (MXHTTPOperation*)setFilter:(MXFilterJSONModel*)filter
@@ -3417,11 +3555,8 @@ typedef void (^MXOnResumeDone)(void);
                     success(filterId);
 
                 } failure:failure];
-
-                if (operation2)
-                {
-                    [operation mutateTo:operation2];
-                }
+                
+                [operation mutateTo:operation2];
             }
 
         } failure:failure];
@@ -3470,11 +3605,8 @@ typedef void (^MXOnResumeDone)(void);
                     success(filter);
 
                 } failure:failure];
-
-                if (operation2)
-                {
-                    [operation mutateTo:operation2];
-                }
+                
+                [operation mutateTo:operation2];
             }
 
         } failure:failure];

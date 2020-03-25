@@ -165,11 +165,8 @@
             }
 
         } failure:failure];
-
-        if (operation2)
-        {
-            [operation mutateTo:operation2];
-        }
+        
+        [operation mutateTo:operation2];
 
     } failure:failure];
 
@@ -222,6 +219,7 @@
                     || (deviceInfo.verified != MXDeviceVerified && encryptToVerifiedDevicesOnly))
                 {
                     // Remove any blocked devices
+                    NSLog(@"[MXMegolmEncryption] getDevicesInRoom: blocked device: %@", deviceInfo);
                     continue;
                 }
 
