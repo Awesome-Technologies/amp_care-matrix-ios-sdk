@@ -52,42 +52,54 @@ static NSArray<MXEventTypeString> *kMXSecretShareEventTypes;
 - (MXHTTPOperation *)requestSecret:(NSString*)secretId
                        toDeviceIds:(nullable NSArray<NSString*>*)deviceIds
                            success:(void (^)(NSString *requestId))success
-                  onSecretReceived:(void (^)(NSString *secret))onSecretReceived
+                  onSecretReceived:(BOOL (^)(NSString *secret))onSecretReceived
                            failure:(void (^)(NSError *error))failure
 {
     NSLog(@"[MXSecretShareManager] requestSecret: %@ to %@", secretId, deviceIds);
     
-    MXCredentials *myUser = _crypto.mxSession.matrixRestClient.credentials;
-    
-    MXSecretShareRequest *request = [MXSecretShareRequest new];
-    request.name = secretId;
-    request.action = MXSecretShareRequestAction.request;
-    request.requestingDeviceId = myUser.deviceId;
-    request.requestId = [MXTools generateTransactionId];
-    
-    MXPendingSecretShareRequest *pendingRequest = [MXPendingSecretShareRequest new];
-    pendingRequest.request = request;
-    pendingRequest.onSecretReceivedBlock = onSecretReceived;
-    pendingRequest.requestedDeviceIds = deviceIds;
-    
-    pendingSecretShareRequests[request.requestId] = pendingRequest;
+    // Create an empty operation that will be mutated later
+    MXHTTPOperation *operation = [[MXHTTPOperation alloc] init];
     
     MXWeakify(self);
-    return [self sendMessage:request.JSONDictionary toDeviceIds:deviceIds success:^{
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            success(request.requestId);
-        });
-        
-    } failure:^(NSError *error) {
+    dispatch_async(_crypto.cryptoQueue, ^{
         MXStrongifyAndReturnIfNil(self);
         
-        [self->pendingSecretShareRequests removeObjectForKey:request.requestId];
+        MXCredentials *myUser = self.crypto.mxSession.matrixRestClient.credentials;
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            failure(error);
-        });
-    }];
+        MXSecretShareRequest *request = [MXSecretShareRequest new];
+        request.name = secretId;
+        request.action = MXSecretShareRequestAction.request;
+        request.requestingDeviceId = myUser.deviceId;
+        request.requestId = [MXTools generateTransactionId];
+        
+        MXPendingSecretShareRequest *pendingRequest = [MXPendingSecretShareRequest new];
+        pendingRequest.request = request;
+        pendingRequest.onSecretReceivedBlock = onSecretReceived;
+        pendingRequest.requestedDeviceIds = deviceIds;
+        
+        self->pendingSecretShareRequests[request.requestId] = pendingRequest;
+        
+        MXWeakify(self);
+        MXHTTPOperation *operation2 = [self sendMessage:request.JSONDictionary toDeviceIds:deviceIds success:^{
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                success(request.requestId);
+            });
+            
+        } failure:^(NSError *error) {
+            MXStrongifyAndReturnIfNil(self);
+            
+            [self->pendingSecretShareRequests removeObjectForKey:request.requestId];
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                failure(error);
+            });
+        }];
+        
+        [operation mutateTo:operation2];
+    });
+    
+    return operation;
 }
 
 - (MXHTTPOperation *)cancelRequestWithRequestId:(NSString*)requestId
@@ -96,34 +108,45 @@ static NSArray<MXEventTypeString> *kMXSecretShareEventTypes;
 {
     NSLog(@"[MXSecretShareManager] cancelRequestWithRequestId: %@", requestId);
     
-    MXPendingSecretShareRequest *pendingRequest = pendingSecretShareRequests[requestId];
-    if (!pendingRequest)
-    {
-        NSLog(@"[MXSecretShareManager] cancelRequestWithRequestId: Unknown request: %@", requestId);
-        failure(nil);
-        return nil;
-    }
+    // Create an empty operation that will be mutated later
+    MXHTTPOperation *operation = [[MXHTTPOperation alloc] init];
     
-    [self->pendingSecretShareRequests removeObjectForKey:requestId];
-    
-    MXCredentials *myUser = _crypto.mxSession.matrixRestClient.credentials;
-    
-    MXSecretShareRequest *request = [MXSecretShareRequest new];
-    request.action = MXSecretShareRequestAction.requestCancellation;
-    request.requestingDeviceId = myUser.deviceId;
-    request.requestId = requestId;
-    
-    return [self sendMessage:request.JSONDictionary toDeviceIds:pendingRequest.requestedDeviceIds success:^{
-        dispatch_async(dispatch_get_main_queue(), ^{
-            success();
-        });
+    MXWeakify(self);
+    dispatch_async(_crypto.cryptoQueue, ^{
+        MXStrongifyAndReturnIfNil(self);
         
-    } failure:^(NSError *error) {
+        MXPendingSecretShareRequest *pendingRequest = self->pendingSecretShareRequests[requestId];
+        if (!pendingRequest)
+        {
+            NSLog(@"[MXSecretShareManager] cancelRequestWithRequestId: Unknown request: %@", requestId);
+            failure(nil);
+        }
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            failure(error);
-        });
-    }];
+        [self->pendingSecretShareRequests removeObjectForKey:requestId];
+        
+        MXCredentials *myUser = self.crypto.mxSession.matrixRestClient.credentials;
+        
+        MXSecretShareRequest *request = [MXSecretShareRequest new];
+        request.action = MXSecretShareRequestAction.requestCancellation;
+        request.requestingDeviceId = myUser.deviceId;
+        request.requestId = requestId;
+        
+        MXHTTPOperation *operation2 = [self sendMessage:request.JSONDictionary toDeviceIds:pendingRequest.requestedDeviceIds success:^{
+            dispatch_async(dispatch_get_main_queue(), ^{
+                success();
+            });
+            
+        } failure:^(NSError *error) {
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                failure(error);
+            });
+        }];
+        
+        [operation mutateTo:operation2];
+    });
+    
+    return operation;
 }
 
 
@@ -385,9 +408,15 @@ static NSArray<MXEventTypeString> *kMXSecretShareEventTypes;
         return;
     }
     
-    pendingRequest.onSecretReceivedBlock(shareSend.secret);
-    
-    [self cancelRequestWithRequestId:shareSend.requestId success:^{} failure:^(NSError * _Nonnull error) {}];
+    if (pendingRequest.onSecretReceivedBlock(shareSend.secret))
+    {
+        NSLog(@"[MXSecretShareManager] handleSecretSendEvent: Secret has been validated. Cancel the request %@", shareSend.requestId);
+        [self cancelRequestWithRequestId:shareSend.requestId success:^{} failure:^(NSError * _Nonnull error) {}];
+    }
+    else
+    {
+        NSLog(@"[MXSecretShareManager] handleSecretSendEvent: Not valid secret. Keep request %@ on", shareSend.requestId);
+    }
 }
 
 @end

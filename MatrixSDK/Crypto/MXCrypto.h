@@ -28,6 +28,7 @@
 #import "MXIncomingRoomKeyRequest.h"
 #import "MXIncomingRoomKeyRequestCancellation.h"
 
+#import "MXSecretStorage.h"
 #import "MXSecretShareManager.h"
 
 #import "MXKeyBackup.h"
@@ -97,6 +98,11 @@ extern NSString *const MXDeviceListDidUpdateUsersDevicesNotification;
  The device verification manager.
  */
 @property (nonatomic, readonly) MXKeyVerificationManager *keyVerificationManager;
+
+/**
+ The secret storage on homeserver manager.
+ */
+@property (nonatomic, readonly) MXSecretStorage *secretStorage;
 
 /**
  The secret share manager.
@@ -288,9 +294,9 @@ extern NSString *const MXDeviceListDidUpdateUsersDevicesNotification;
  Get the stored summary of users trust level (trusted users and devices count).
  
  @param userIds The user ids.
- @return the trust summary.
+ @param onComplete the callback called once operation is done.
  */
-- (MXUsersTrustLevelSummary *)trustLevelSummaryForUserIds:(NSArray<NSString*>*)userIds;
+- (void)trustLevelSummaryForUserIds:(NSArray<NSString*>*)userIds onComplete:(void (^)(MXUsersTrustLevelSummary *trustLevelSummary))onComplete;
 
 
 #pragma mark - Users keys
@@ -367,6 +373,14 @@ extern NSString *const MXDeviceListDidUpdateUsersDevicesNotification;
  @param onComplete the callback called once operation is done.
  */
 - (void)deleteStore:(void (^)(void))onComplete;
+
+
+#pragma mark - Gossipping
+
+/**
+ Make requests to get key private keys from other user's devices.
+ */
+- (void)requestAllPrivateKeys;
 
 
 #pragma mark - import/export
